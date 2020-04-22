@@ -4,13 +4,19 @@
 -- transmission noise. Compare the results of your simulation with the
 -- theoretically predicted error probability
 import qualified Data.Vector as V
+import qualified Data.Map.Strict as M
+import qualified Data.Set as S
 
 data Z2 = Zero
         | One
+        deriving (Eq, Ord)
 
 instance Show Z2 where
     show Zero = "0"
     show One = "1"
+
+type Information = V.Vector Z2
+type CodeWord = V.Vector Z2
 
 instance Num Z2 where
     One + One = Zero
@@ -119,16 +125,17 @@ hammingBitsMatrix = transpose $ fromInteger <$> createMatrix
     , [0, 1, 0, 1]
     , [0, 1, 1, 0]
     , [0, 1, 1, 1]
-    , [1, 0, 0, 1]
+        {- , [1, 0, 0, 1]
     , [1, 0, 1, 0]
     , [1, 0, 1, 1]
     , [1, 1, 0, 0]
     , [1, 1, 0, 1]
     , [1, 1, 1, 0]
     , [1, 1, 1, 1]
+        -}
     ]
 
-blockSize = 15
+blockSize = 8
 
 identityMatrix = createIdentity (blockSize - (snd . size) hammingBitsMatrix) One Zero
 
@@ -138,16 +145,74 @@ hammingMatrix = augmentHorizontally hammingBitsMatrix identityMatrix
 generatorMatrix :: BinaryMatrix Z2
 generatorMatrix = augmentVertically (createIdentity (blockSize - (fst . size) identityMatrix) One Zero) hammingBitsMatrix
 
-word :: BinaryMatrix Z2
-word = transpose $ fromInteger <$> createMatrix [[1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1]]
+generateNBits :: Int -> V.Vector (V.Vector Z2)
+generateNBits bitsLen = V.mapM (const (V.fromList [Zero, One])) $ V.fromList $ replicate bitsLen Zero
+
+toColumnMatrix :: V.Vector a -> BinaryMatrix a
+-- TODO: empty vector raise error
+toColumnMatrix vec = transpose $ BinaryMatrix (1, V.length vec) (V.singleton vec)
+
+toColumnVector :: BinaryMatrix a -> V.Vector a
+toColumnVector mat = V.map (V.! 0) (rows mat)
+
+weight :: V.Vector Z2 -> Int
+weight vec = V.length (V.filter (== One) vec)
+
+vectorSum :: V.Vector Z2 -> V.Vector Z2 -> V.Vector Z2
+vectorSum = V.zipWith (+)
+
+
+generateCodewords :: BinaryMatrix Z2 -> Int -> V.Vector CodeWord
+generateCodewords genMat infoSize = V.map (toColumnVector. multiply genMat . toColumnMatrix) (generateNBits infoSize)
+
+cosetLeaders :: V.Vector CodeWord -> S.Set CodeWord
+cosetLeaders codeGroup = V.foldl updateCosetLeaderSet S.empty possibleBits
+    where codeSize = V.length $ codeGroup V.! 0  -- length of first codeword
+          possibleBits = generateNBits codeSize
+          updateCosetLeaderSet set nTuple = S.insert cosetLeader set
+              where cosetElems = V.zipWith vectorSum (V.fromList $ replicate (length codeGroup) nTuple) codeGroup
+                    cosetLeader = V.foldl (\minm elem -> if weight elem < weight minm then elem else minm) (V.head cosetElems) (V.tail cosetElems)
+
+syndromeCosetLeaderMap :: BinaryMatrix Z2 -> S.Set CodeWord -> M.Map (V.Vector Z2) CodeWord
+syndromeCosetLeaderMap hamMatrix cosetLeaders = M.fromList (zip syndromes leadersList)
+    where leadersList = S.toList cosetLeaders
+          syndromes = map (toColumnVector. multiply hamMatrix . toColumnMatrix) leadersList
+
+
+decode :: CodeWord -> BinaryMatrix Z2 -> M.Map (V.Vector Z2) CodeWord -> CodeWord
+decode word hamMatrix syndromeCosetMap =
+    case M.lookup syndrome syndromeCosetMap of
+      Just x -> vectorSum x word
+      _ -> error "Oh My god!!"
+    where syndrome = (toColumnVector . multiply hamMatrix . toColumnMatrix) word
+
+
+cws = [
+      [0,0,0,0,0,0,0,0]
+    , [0,0,0,1,0,1,1,1]
+    , [0,0,1,0,0,1,1,0]
+    , [0,0,1,1,0,0,0,1]
+    , [0,1,0,0,0,1,0,1]
+    , [0,1,0,1,0,0,1,0]
+    , [0,1,1,0,0,0,1,1]
+    , [0,1,1,1,0,1,0,0]
+    , [1,0,0,0,0,0,1,1]
+    , [1,0,0,1,0,1,0,0]
+    , [1,0,1,0,0,1,0,1]
+    , [1,0,1,1,0,0,1,0]
+    , [1,1,0,0,0,1,1,0]
+    , [1,1,0,1,0,0,0,1]
+    , [1,1,1,0,0,0,0,0]
+    , [1,1,1,1,0,1,1,1]
+    ]
+
+cw = fromInteger <$> V.fromList ([1,1,1,0,0,0,0,0] :: [Integer])
+modifiedcw = fromInteger <$> V.fromList ([1,1,1,1,0,0,0,1] :: [Integer])
 
 main :: IO ()
 main = do
-    let mat = createMatrix [[1,2,3], [2, 3, 4]]
-    let tr = transpose mat
-    print hammingMatrix
-    print generatorMatrix
-    print word
-    let codeword = multiply generatorMatrix word
-    print codeword
-    print $ multiply hammingMatrix codeword
+    let codewords = generateCodewords generatorMatrix 4
+    let leadersSet = cosetLeaders codewords
+    let syndromeMap = syndromeCosetLeaderMap hammingMatrix leadersSet
+    print syndromeMap
+    print $ decode modifiedcw hammingMatrix syndromeMap
